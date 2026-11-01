@@ -10,7 +10,12 @@ from aiida.parsers.parser import Parser
 from aiida.plugins import CalculationFactory
 
 from ..common import make_retrieve_list
-from .raw_parsers import AbacusRawParser, InternalParametersParser, KpointsParser, StruParser
+from .raw_parsers import (
+    AbacusRawParser,
+    InternalParametersParser,
+    KpointsParser,
+    StruParser,
+)
 
 AbacusCalculation = CalculationFactory("abacus.abacus")
 
@@ -46,8 +51,12 @@ class AbacusParser(Parser):
         :returns: an exit code, if parsing fails (or nothing if parsing succeeds)
         """
         output_folder = self.retrieved
-        settings = {} if "settings" not in self.node.inputs else self.node.inputs.settings
-        expected_files = make_retrieve_list(self.node.inputs.parameters, settings, AbacusCalculation._OUTPUT_SUFFIX)
+        settings = (
+            {} if "settings" not in self.node.inputs else self.node.inputs.settings
+        )
+        expected_files = make_retrieve_list(
+            self.node.inputs.parameters, settings, AbacusCalculation._OUTPUT_SUFFIX
+        )
         # Add the STDOUT diversion
         expected_files.append(AbacusCalculation._ABACUS_OUTPUT)
         run_type = self.node.inputs.parameters["input"].get("calculation", "scf")
@@ -79,7 +88,9 @@ class AbacusParser(Parser):
             kweights = kpoints_direct[:, 3]
             node = orm.BandsData()
             node.set_kpoints(kcoord, weights=kweights)
-            assert kcoord.shape[0] == eigenvalues.shape[1], "Inconsistent number of kpoints reported (do not use kpar)"
+            assert kcoord.shape[0] == eigenvalues.shape[1], (
+                "Inconsistent number of kpoints reported (do not use kpar)"
+            )
             node.set_bands(eigenvalues, occupations=occupations)
             node.labels = self.node.inputs.kpoints.labels
             # Record the fermi level - the unit is eV
@@ -88,15 +99,31 @@ class AbacusParser(Parser):
 
         # TODO: there could be other types that should have a output structure
         if run_type in ["relax", "cell-relax", "md"]:
-            # Parse the final structure
-            fname = next(filter(lambda x: "STRU_ION_D" in x, expected_files))
-            with output_folder.open(fname, "r") as fhandle:
-                parser = StruParser(fhandle)
-                cell, positions, species = parser.parse_structure()
-            node = orm.StructureData(cell=cell)
-            for pos, symbol in zip(positions, species):
-                node.append_atom(position=pos, symbols=symbol)
-            self.out("structure", node)
+            # Parse the final structure: v3.11 writes STRU_FINAL,
+            # v3.10 wrote STRU_ION_D; pick the first non-empty candidate
+            # (STRU_ION_D may exist as an empty placeholder).
+            candidates = [x for x in expected_files if "STRU_FINAL" in x] + [
+                x for x in expected_files if "STRU_ION_D" in x
+            ]
+            fname = None
+            for cand in candidates:
+                try:
+                    with output_folder.open(cand, "r") as probe:
+                        if probe.read(1):
+                            fname = cand
+                            break
+                except (FileNotFoundError, NotADirectoryError):
+                    continue
+            if fname is None:
+                self.logger.warning("No non-empty structure output file found")
+            else:
+                with output_folder.open(fname, "r") as fhandle:
+                    parser = StruParser(fhandle)
+                    cell, positions, species = parser.parse_structure()
+                node = orm.StructureData(cell=cell)
+                for pos, symbol in zip(positions, species):
+                    node.append_atom(position=pos, symbols=symbol)
+                self.out("structure", node)
             # TODO parse the trajectory output from STRU_ION*_D files
 
         # Parse the calculation raw parameters
@@ -128,4 +155,6 @@ class AbacusParser(Parser):
 
         if "settings" not in self.node.inputs:
             return DEFAULT_OUTPUT_SETTINGS[name]
-        return self.node.inputs.settings.get("include_" + name, DEFAULT_OUTPUT_SETTINGS[name])
+        return self.node.inputs.settings.get(
+            "include_" + name, DEFAULT_OUTPUT_SETTINGS[name]
+        )

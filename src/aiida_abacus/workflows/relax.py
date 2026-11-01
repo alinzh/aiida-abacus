@@ -273,7 +273,7 @@ class AbacusRelaxWorkChain(ProtocolMixin, WorkChain):
 
         # Set relaxed structure as input structure for next iteration
         self.ctx.current_structure = structure
-        self.ctx.current_number_of_bands = workchain.outputs.misc.get_dict()["number_of_bands"]
+        self.ctx.current_number_of_bands = workchain.outputs.misc.get_dict().get("number_of_bands")
         self.report(f"after iteration {self.ctx.iteration} cell volume of relaxed structure is {curr_cell_volume}")
 
         # After first iteration, simply set the cell volume and restart the next base workchain
