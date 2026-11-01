@@ -6,7 +6,17 @@ import yaml
 from aiida import orm
 from aiida.common import AttributeDict
 
-DEFAULT_RETRIEVE_FILES = ("INPUT", "kpoints", "device.log", "warning.log", "istate.info", "STRU_ION_D", "STRU_ION*_D")
+DEFAULT_RETRIEVE_FILES = (
+    "INPUT",
+    "kpoints",
+    "device.log",
+    "warning.log",
+    "istate.info",
+    "STRU_ION_D",
+    "STRU_ION*_D",
+    "STRU_FINAL",
+    "STRU_NOW",
+)
 
 
 def make_retrieve_list(
@@ -20,25 +30,33 @@ def make_retrieve_list(
     and folder suffix this because the exact file names depends on the calculation
     type and suffix defined by the user
     """
-    calc_type = parameters["input"].get("calculation", "scf")  # Abacus default to SCF file
+    calc_type = parameters["input"].get(
+        "calculation", "scf"
+    )  # Abacus default to SCF file
     excluded = settings.get("excluded_retrieve_list", [])
     additional = settings.get("additional_retrieve_list", [])
     add_density = settings.get("retrieve_charge_density", False)
+
+    # Retrieve layout: `flat_output: true` in settings yields flat retrieve
+    # paths (no OUT.<suffix>/ prefix) — required by schedulers that download
+    # results flat (yascheduler). The flag never reaches the ABACUS INPUT file,
+    # which rejects unknown parameters (v3.11+).
+    prefix = "" if settings.get("flat_output", False) else f"OUT.{folder_suffix}/"
 
     files = []
     for name in DEFAULT_RETRIEVE_FILES:
         if name in excluded:
             continue
-        files.append(f"OUT.{folder_suffix}/{name}")
+        files.append(f"{prefix}{name}")
 
     for name in additional:
         if name in excluded:
             continue
-        files.append(f"OUT.{folder_suffix}/{name}")
+        files.append(f"{prefix}{name}")
 
-    files.append(f"OUT.{folder_suffix}/running_{calc_type}.log")
+    files.append(f"{prefix}running_{calc_type}.log")
     if add_density:
-        files.append(f"OUT.{folder_suffix}/{folder_suffix}-CHARGE-DENSITY.restart")
+        files.append(f"{prefix}{folder_suffix}-CHARGE-DENSITY.restart")
 
     if full_specification:
         output = []
@@ -80,7 +98,10 @@ class ProtocolMixin:
             contains at least the key `description` and optionally other keys with supplementary information.
         """
         data = cls._load_protocol_file()
-        return {protocol: {"description": values["description"]} for protocol, values in data["protocols"].items()}
+        return {
+            protocol: {"description": values["description"]}
+            for protocol, values in data["protocols"].items()
+        }
 
     @classmethod
     def get_protocol_inputs(
@@ -155,7 +176,9 @@ def recursive_merge(left: dict, right: dict) -> dict:
 
     for key, value in left.items():
         if key in right:
-            if isinstance(value, collections.abc.Mapping) and isinstance(right[key], collections.abc.Mapping):
+            if isinstance(value, collections.abc.Mapping) and isinstance(
+                right[key], collections.abc.Mapping
+            ):
                 right[key] = recursive_merge(value, right[key])
 
     merged = left.copy()
@@ -177,12 +200,20 @@ class RelaxType(enum.Enum):
 
     NONE = "none"  # All degrees of freedom are fixed, essentially performs single point SCF calculation
     POSITIONS = "positions"  # Only the atomic positions are relaxed, cell is fixed
-    VOLUME = "volume"  # Only the cell volume is optimized, cell shape and atoms are fixed
+    VOLUME = (
+        "volume"  # Only the cell volume is optimized, cell shape and atoms are fixed
+    )
     SHAPE = "shape"  # Only the cell shape is optimized at a fixed volume and fixed atomic positions
     CELL = "cell"  # Only the cell is optimized, both shape and volume, while atomic positions are fixed
-    POSITIONS_VOLUME = "positions_volume"  # Same as `VOLUME` but atomic positions are relaxed as well
-    POSITIONS_SHAPE = "positions_shape"  # Same as `SHAPE`  but atomic positions are relaxed as well
-    POSITIONS_CELL = "positions_cell"  # Same as `CELL`  but atomic positions are relaxed as well
+    POSITIONS_VOLUME = (
+        "positions_volume"  # Same as `VOLUME` but atomic positions are relaxed as well
+    )
+    POSITIONS_SHAPE = (
+        "positions_shape"  # Same as `SHAPE`  but atomic positions are relaxed as well
+    )
+    POSITIONS_CELL = (
+        "positions_cell"  # Same as `CELL`  but atomic positions are relaxed as well
+    )
 
 
 class SpinType(enum.Enum):
@@ -237,7 +268,11 @@ def wrap_bare_dict_inputs(port_namespace, inputs):
             continue
 
         port = port_namespace[key]
-        valid_types = port.valid_type if isinstance(port.valid_type, (list, tuple)) else (port.valid_type,)
+        valid_types = (
+            port.valid_type
+            if isinstance(port.valid_type, (list, tuple))
+            else (port.valid_type,)
+        )
 
         if isinstance(port, PortNamespace):
             wrapped[key] = wrap_bare_dict_inputs(port, value)

@@ -32,38 +32,77 @@ class AbacusRawParser(BaseRawParser):
     def parse_blocks(self) -> None:
         """
         Parse blocks from output file.
-        """
-        # Re pattern to match the block name, unit and content.
-        pattern = re.compile(
-            r"---------+\n TOTAL-(FORCE|STRESS) \(([a-zA-Z/]+)\) *\n------+\n(.*?)\n--------+", flags=re.DOTALL
-        )
-        # First, process all blocks
-        all_blocks = []
-        for match in re.findall(pattern, self.content):
-            block_type = match[0]
-            block_unit = match[1]
-            block_content = match[2]
-            lines = [line.strip() for line in block_content.split("\n")]
-            all_blocks.append((block_type, block_unit, lines))
 
+        Supports both the v3.10 layout::
+
+            ---------
+             TOTAL-FORCE (eV/Angstrom)
+            ------
+            Si1 0.0 0.0 0.0
+            ------
+
+        and the v3.11 layout::
+
+             #TOTAL-FORCE (eV/Angstrom)#
+            ------------------------------------
+                Atoms     Force_x  Force_y  Force_z
+            ------------------------------------
+            Si1 0.0 0.0 0.0
+            ------------------------------------
+        """
+        # v3.10
+        p_old = re.compile(
+            r"-+\n TOTAL-(FORCE|STRESS) \(([a-zA-Z/]+)\) *\n\s*-+\n(.*?)\n\s*-+",
+            flags=re.DOTALL,
+        )
+        # v3.11: optional column-header line between the two separator lines
+        p_new = re.compile(
+            r"#\s*TOTAL-(FORCE|STRESS) \(([a-zA-Z/]+)\)\s*#\s*\n\s*-+\n(?:[^\n]*\n)?\s*-+\n(.*?)\n\s*-+",
+            flags=re.DOTALL,
+        )
+
+        all_blocks = []
+        seen_spans = []
+        for pattern in (p_old, p_new):
+            for match in pattern.finditer(self.content):
+                if any(
+                    match.start() < end and match.end() > start
+                    for start, end in seen_spans
+                ):
+                    continue  # overlap: same block already captured by the other pattern
+                seen_spans.append((match.start(), match.end()))
+                all_blocks.append((match.group(1), match.group(2), match.group(3)))
+
+        atom_label = re.compile(r"^[A-Za-z]{1,3}\d*$")
         all_forces = []
         all_stress = []
-        # Process the blocks one by one, additional block type can be supported by adding more elifs.
-        for block_type, block_unit, lines in all_blocks:
-            if block_type == "FORCE":
-                forces = []
-                for line in lines:
-                    tokens = line.split()
-                    forces.append([float(token) for token in tokens[1:]])
-                all_forces.append(forces)
-                self.results["force_unit"] = block_unit
+        for block_type, block_unit, block_content in all_blocks:
+            lines = []
+            for line in block_content.split("\n"):
+                tokens = line.split()
+                if not tokens:
+                    continue
+                try:
+                    if block_type == "FORCE":
+                        # atom label then Fx Fy Fz
+                        if len(tokens) < 4 or not atom_label.match(tokens[0]):
+                            continue
+                        values = [float(token) for token in tokens[1:]]
+                    else:
+                        if len(tokens) < 3:
+                            continue
+                        values = [float(token) for token in tokens]
+                except ValueError:
+                    continue
+                lines.append(values)
+            if lines:
+                if block_type == "FORCE":
+                    all_forces.append(lines)
+                    self.results["force_unit"] = block_unit
+                else:
+                    all_stress.append(lines)
+                    self.results["stress_unit"] = block_unit
 
-            if block_type == "STRESS":
-                stress = []
-                for line in lines:
-                    stress.append([float(token) for token in line.split()])
-                all_stress.append(stress)
-                self.results["stress_unit"] = block_unit
         self.results["all_forces"] = all_forces
         self.results["all_stress"] = all_stress
         self.results["final_forces"] = all_forces[-1] if all_forces else None
@@ -103,7 +142,10 @@ class AbacusRawParser(BaseRawParser):
         """
 
         kdirect = BlockParser(
-            self.lines, re.compile(r"^K-POINTS (DIRECT) COORDINATES"), offset=2, types=[int, float, float, float, float]
+            self.lines,
+            re.compile(r"^K-POINTS (DIRECT) COORDINATES"),
+            offset=2,
+            types=[int, float, float, float, float],
         ).parse()
         kcart = BlockParser(
             self.lines,
@@ -126,10 +168,14 @@ class AbacusRawParser(BaseRawParser):
         """
 
         nspins = int(re.search(r"NSPIN == (\d)", self.content).group(1))
-        nkthis_procs = int(re.search(r"k-point number in this process = (\d+)", self.content).group(1))
+        nkthis_procs = int(
+            re.search(r"k-point number in this process = (\d+)", self.content).group(1)
+        )
         parser = BlockParser(
             self.lines,
-            re.compile(r"^ (\d+)/(\d+) kpoint \(Cartesian\) *= *([-0-9.]+) ([-0-9.]+) ([-0-9.]+)"),
+            re.compile(
+                r"^ (\d+)/(\d+) kpoint \(Cartesian\) *= *([-0-9.]+) ([-0-9.]+) ([-0-9.]+)"
+            ),
             offset=1,
             types=[int, float, float],
         )
@@ -150,7 +196,9 @@ class AbacusRawParser(BaseRawParser):
             # Sanity check
             if i == 0:
                 nkpt_tot = int(key[1])
-                assert nkpt_tot == nkpts, "Mismatch in kpont number possible unsupported spin type"
+                assert nkpt_tot == nkpts, (
+                    "Mismatch in kpont number possible unsupported spin type"
+                )
             kpt_cart[ikpt - 1, 0] = float(key[2])
             kpt_cart[ikpt - 1, 1] = float(key[3])
             kpt_cart[ikpt - 1, 2] = float(key[4])
@@ -170,8 +218,12 @@ class AbacusRawParser(BaseRawParser):
         eigen_arrays = []
         occ_arrays = []
         for spin in range(nspins):
-            eigen_arrays.append(np.stack([eigenvalues[spin][i] for i in range(1, nkpts + 1)], axis=0))
-            occ_arrays.append(np.stack([occupations[spin][i] for i in range(1, nkpts + 1)], axis=0))
+            eigen_arrays.append(
+                np.stack([eigenvalues[spin][i] for i in range(1, nkpts + 1)], axis=0)
+            )
+            occ_arrays.append(
+                np.stack([occupations[spin][i] for i in range(1, nkpts + 1)], axis=0)
+            )
         return np.stack(eigen_arrays, axis=0), np.stack(occ_arrays, axis=0), kpt_cart
 
 
@@ -180,7 +232,9 @@ class BlockParser:
 
     DEFAULT_END_CHAR = ["------", "++++++"]
 
-    def __init__(self, lines: List[str], key_re, offset=1, types=None, end_characters=None):
+    def __init__(
+        self, lines: List[str], key_re, offset=1, types=None, end_characters=None
+    ):
         """
         A parser to parse blocks of data by searching a title line
         Example:
@@ -241,7 +295,12 @@ class BlockParser:
             new_block = []
             for tokens in block_tokens:
                 # Use the type constructors to convert the string data to the right type
-                new_block.append([constructor(token) for constructor, token in zip(self.types, tokens)])
+                new_block.append(
+                    [
+                        constructor(token)
+                        for constructor, token in zip(self.types, tokens)
+                    ]
+                )
             converted.append([block_name, new_block])
         return converted
 
@@ -322,8 +381,21 @@ class StruParser(BaseRawParser):
         :returns: A tuple of lattice vectors, positions, species.
         """
         blocks = self.parse_blocks()
-        lattice_constant = float(blocks["LATTICE_CONSTANT"][0])  # In bohr
-        lattice_vectors = np.array([[float(value) for value in line.split()] for line in blocks["LATTICE_VECTORS"]])
+        # LATTICE_CONSTANT may carry a trailing comment; v3.11 STRU_FINAL
+        # writes "1.889... # in Bohr (= 1 Angstrom); lattice vectors below
+        # are in Angstrom", meaning the vectors are already in Angstrom.
+        lat_line = blocks["LATTICE_CONSTANT"][0]
+        lattice_constant = float(lat_line.split("#")[0].split()[0])  # In bohr
+        # v3.11 STRU_FINAL writes the constant in bohr-per-angstrom
+        # (1.8897...) with the lattice vectors already in Angstrom;
+        # v3.10 wrote the constant in bohr with unitless vectors.
+        vectors_in_angstrom = abs(lattice_constant - 1.8897268778) < 1e-3
+        lattice_vectors = np.array(
+            [
+                [float(value) for value in line.split()]
+                for line in blocks["LATTICE_VECTORS"]
+            ]
+        )
         positions = []
         species = []
         # magnetic_moments = []
@@ -342,7 +414,8 @@ class StruParser(BaseRawParser):
             p += 3 + int(current_natoms)
         positions = np.array(positions)
         # Lattice vectors in angstrom
-        lattice_vectors *= lattice_constant / 1.8897261255
+        if not vectors_in_angstrom:
+            lattice_vectors *= lattice_constant / 1.8897261255
 
         if coord_type == "Direct":
             positions = positions @ lattice_vectors
@@ -354,7 +427,11 @@ class StruParser(BaseRawParser):
             pass
         else:
             raise ValueError(f"Unknown coordinate type {coord_type}")
-        self.structure = {"lattice_vectors": lattice_vectors, "species": species, "positions": positions}
+        self.structure = {
+            "lattice_vectors": lattice_vectors,
+            "species": species,
+            "positions": positions,
+        }
         return lattice_vectors, positions, species
 
     def parse_structure(self):
@@ -363,7 +440,12 @@ class StruParser(BaseRawParser):
 
     def parse_blocks(self):
         """Split the file content by their blocks"""
-        keywords = ["ATOMIC_SPECIES", "LATTICE_CONSTANT", "LATTICE_VECTORS", "ATOMIC_POSITIONS"]
+        keywords = [
+            "ATOMIC_SPECIES",
+            "LATTICE_CONSTANT",
+            "LATTICE_VECTORS",
+            "ATOMIC_POSITIONS",
+        ]
         blocks = {}
         current_block = None
         for _line in self.lines:
